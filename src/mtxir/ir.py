@@ -20,12 +20,39 @@ GF2 = GF(2)
 from typing import List
 
 class MemoryInstruction(str, Enum):
-    LOAD = "LOAD"
-    STORE = "STORE"
+    """
+    A memory operation and the number of time steps it occupies.
+    MemoryInstruction("LOAD") still looks a member up by its name.
+    """
+
+    LOAD = ("LOAD", 3)
+    STORE = ("STORE", 3)
+
+    def __new__(cls, name: str, time_steps: int):
+        member = str.__new__(cls, name)
+        member._value_ = name
+        member.time_steps = time_steps
+        return member
+
 
 
 @dataclass(frozen=True)
 class Instruction:
+    """
+    Class Instruction defines the load and store instruction. 
+    The syntax is [TIME] [LOAD/STORE] [QUBIT] [DEST]. 
+    For example, 
+        Instruction(1, LOAD, "q0", "SC[0]")
+        Instruction(5, STORE, "q1", "MEM[0][0]")
+
+    We assume memory will be some high-rate code that stores multiple logical qubits
+    in a single block, and surface code only stores one logical qubit. They are treated
+    as two types of storage units, surface code as an 1D array composed of several
+    patches and memory blocks (memory banks) as a 2D array.
+    Unlike qubit, we view the surface code patch and memory block as nameless units.
+    """
+
+
     time_index: int
     instr: MemoryInstruction | str
     qubit: str
@@ -146,9 +173,13 @@ class MtxIRLayer:
     def n(self):
         return self.sx.shape[1]
 
-    def update_layer(self, hx, hz):
-        replacement = MtxIRLayer(self.time_step, hx, hz, rounds=self.rounds)
+    def update_layer(self, hx=None, hz=None, *, sx=None, sz=None, rounds=None):
+        """Replace this layer's checks, keeping its time step; ``rounds``
+        replaces the round count when given."""
+        replacement = MtxIRLayer(self.time_step, hx, hz, sx=sx, sz=sz,
+                                 rounds=self.rounds if rounds is None else rounds)
         self.__dict__.update(replacement.__dict__)
+
 
     @property
     def qubit_overhead(self):
@@ -382,6 +413,12 @@ class MtxIRCompiler:
         def global_row(b, local):
             row = b.local_to_global_row_mapping[other.lower()][local]
             return row if other == "X" else n_x_rows + row
+
+        # New edges go after every column allocated so far, including those
+        # of gaugings built after ``base`` was (e.g. the joint step before
+        # the source step, or a parallel instruction).
+        if base.n < self.n:
+            base = self._restored(base, base.time_step, base.rounds)
 
         old_n = base.n
 
@@ -696,6 +733,7 @@ class MtxIRCompiler:
 
     def _teleport(
         self,
+        bases: List[MtxIRLayer],
         source: CodeBlock,
         source_slot: int,
         dest: CodeBlock,
@@ -728,6 +766,9 @@ class MtxIRCompiler:
         Assumes the original check rows retain their initial global
         positions, and that ``base`` is the unmodified code.
         """
+
+        assert (len(bases) >= 3), "len(bases) must be at least 3"
+
         qubit = source.qubits[source_slot - 1]
         if qubit is None:
             raise ValueError(f"Source slot {source_slot} is empty.")
@@ -741,7 +782,7 @@ class MtxIRCompiler:
         dest_basis, dest_sign = state
         joint = "Z" if dest_basis == "X" else "X"
 
-        base = self.layers[-1]
+        base = bases[0]
         start = base.time_step if in_time else self.time
 
         source_logicals = self._slot_logicals(source, source_slot)
@@ -761,21 +802,15 @@ class MtxIRCompiler:
             attach=(attach_block, attach_logicals[joint]),
         )
 
-        if in_time:
-            self.layers[-1] = joint_layer
-        else:
-            self.layers.append(joint_layer)
-
-        self.layers.append(self._restored(base, start + 1, rounds=1))
+        updated_layers = []
+        updated_layers.append(joint_layer)
 
         source_layer, source_gadget = self._gauging_layer(
-            self.layers[-1], source, source_logicals[dest_basis], dest_basis,
-            start + 2,
+            bases[1], source, source_logicals[dest_basis], dest_basis,
+            bases[1].time_step,
         )
-        self.layers.append(source_layer)
-
-        self.layers.append(self._restored(base, start + 3, rounds=1))
-        self.time = start + 4
+        updated_layers.append(source_layer)
+        updated_layers.append(self._restored(bases[2], bases[2].time_step, 1))
 
         # ------------------------------------------------------------
         # Pauli frame and logical locations.
@@ -783,7 +818,7 @@ class MtxIRCompiler:
         # (Pauli, time step, vertex check rows giving its condition)
         corrections = [
             (dest_basis, start, joint_gadget["vertex_check_rows"]),
-            (joint, start + 2, source_gadget["vertex_check_rows"]),
+            (joint, bases[1].time_step, source_gadget["vertex_check_rows"]),
         ]
         if dest_sign is not None:
             corrections.append((joint, *dest_sign))
@@ -798,16 +833,17 @@ class MtxIRCompiler:
 
         source.qubits[source_slot - 1] = None
         source.empty_state[source_slot - 1] = (
-            dest_basis, (start + 2, source_gadget["vertex_check_rows"])
+            dest_basis, (bases[1].time_step, source_gadget["vertex_check_rows"])
         )
         dest.qubits[dest_slot - 1] = qubit
         dest.empty_state[dest_slot - 1] = None
         self.locations[qubit] = dest
 
-        return joint_gadget, source_gadget
+        return joint_gadget, source_gadget, updated_layers
 
     def _load(
         self,
+        bases: List[MtxIRLayer],
         memory_code_block: CodeBlock,
         surface_code_block: CodeBlock,
         qubit: str,
@@ -820,13 +856,14 @@ class MtxIRCompiler:
         if surface_code_block.qubits[0] is not None:
             raise ValueError("The destination surface code block is occupied.")
 
-        return self._teleport(
-            memory_code_block, memory_code_block.qubits.index(qubit) + 1,
+        return self._teleport(bases, memory_code_block,
+            memory_code_block.qubits.index(qubit) + 1,
             surface_code_block, 1, in_time,
         )
 
     def _store(
         self,
+        bases: List[MtxIRLayer],
         surface_code_block: CodeBlock,
         memory_code_block: CodeBlock,
         dest: int = None,
@@ -843,7 +880,7 @@ class MtxIRCompiler:
             if dest is None:
                 raise ValueError("Memory Block is full")
 
-        return self._teleport(
+        return self._teleport(bases, 
             surface_code_block, 1, memory_code_block, dest, in_time,
         )
 
@@ -874,36 +911,85 @@ class MtxIRCompiler:
         self.layers.append(layer)
         self.time = layer.time_step + 1
 
+    def find_layer(self, t):
+        for layer in self.layers:
+            if layer.time_step == t:
+                return layer
+        
+
 
     def compile(self, instructions: List[Instruction]):
-        for instr in instructions:
-            if instr.time_index < self.layers[-1].time_step:
-                raise ValueError("Instructions must be in time order.")
 
-            while self.layers[-1].time_step < instr.time_index:
+        # check dependency
+        
+        occupancy: Dict[int, List[str]] = {}
+        timing_groups: Dict[int, List[Instruction]] = {}
+
+        for instr in instructions:
+            if not instr.time_index in timing_groups:
+                timing_groups[instr.time_index] = []
+
+        for instr in instructions:
+            timing_groups[instr.time_index].append(instr)
+            for t in range(instr.time_index, instr.time_index + instr.instr.time_steps):
+                if t not in occupancy:
+                    occupancy[t] = []
+                occupancy[t].append(instr.qubit)
+                occupancy[t].append(instr.destination)
+
+
+#         import json
+#         print(json.dumps(occupancy, indent=4)) 
+
+        for t, values in occupancy.items():
+            if len(values) != len(set(values)):
+                raise ValueError(f"At time {t}, qubits or blocks are involved in two operations")
+
+
+        for t, instr_group in timing_groups.items():
+            while self.layers[-1].time_step < t: # include the layer we are building. Later, use in-time to update the layer
                 self.step()
 
-            if instr.instr == MemoryInstruction.LOAD:
-                source = self.locations[instr.qubit]
-                if not any(source is b for b in self.memory_code_blocks):
-                    raise ValueError(f"{instr.qubit} is not in a memory block.")
+            for instr in instr_group:
+                print("Instr: ", instr)
+                # Build the layers the instruction occupies, if not yet built.
+                steps = instr.instr.time_steps
+                tt = 0
+                while tt < t + steps:
+                    if self.find_layer(tt) == None:
+                        self.step()
+                    tt += 1
 
-                # Occupies time steps time_index .. time_index + 3.
-                self._load(
-                    source,
-                    self.surface_code_blocks[instr.block_index],
-                    instr.qubit,
-                    in_time=True,
-                )
-            else:
-                source = self.locations[instr.qubit]
-                if not any(source is sc for sc in self.surface_code_blocks):
-                    raise ValueError(f"{instr.qubit} is not in a surface code block")
+                bases = [self.find_layer(t + k) for k in range(steps)]
+                if instr.instr == MemoryInstruction.LOAD:
+                    source = self.locations[instr.qubit]
+                    if not any(source is b for b in self.memory_code_blocks):
+                        raise ValueError(f"{instr.qubit} is not in a memory block.")
 
-                self._store(
-                    source, self.memory_code_blocks[instr.block_index],
-                    instr.slot_index, in_time=True
-                )
+                    _, __, updated_layers = self._load(
+                        bases, source, self.surface_code_blocks[instr.block_index],
+                        instr.qubit, in_time=True,
+                    )
+                elif instr.instr == MemoryInstruction.STORE:
+                    source = self.locations[instr.qubit]
+                    if not any(source is sc for sc in self.surface_code_blocks):
+                        raise ValueError(f"{instr.qubit} is not in a surface code block")
+
+                    _, __, updated_layers = self._store(
+                        bases, source, self.memory_code_blocks[instr.block_index],
+                        instr.slot_index, in_time=True
+                    )
+                else:
+                    raise ValueError(f"Instruction {instr.instr} is not supported yet")
+
+                for i in range(len(bases)):
+                    new = updated_layers[i]
+                    if new.hx is not None:
+                        bases[i].update_layer(new.hx, new.hz, rounds=new.rounds)
+                    else:
+                        bases[i].update_layer(sx=new.sx, sz=new.sz, rounds=new.rounds)
+                
+
 
     @property
     def MtxIRs(self):
