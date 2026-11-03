@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mtxir"
+version = "0.1.0"
+description = "Compile LOAD/STORE programs between a gross-code memory and surface codes into noisy Stim circuits"
+requires-python = ">=3.10"
+authors = [{ name = "Eugene Lin", email = "lin567@wisc.edu" }]
+dependencies = [
+    "numpy",
+    "galois",
+    "networkx",
+    "stim",
+    "sympy",
+    "bposd",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
