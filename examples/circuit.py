@@ -16,8 +16,8 @@ if __name__ == '__main__':
         Instruction(1, "LOAD", "q0", "SC[0]"),
         Instruction(1, "LOAD", "q1", "SC[1]"),
         Instruction(3, "LOAD", "q2", "SC[2]"),
-        Instruction(4, "STORE", "q0", "MEM[0][1]"),
-        Instruction(4, "STORE", "q1", "MEM[1][4]"),
+        Instruction(4, "STORE", "q0", "MEM[0][0]"),
+        Instruction(4, "STORE", "q1", "MEM[1][3]"),
         Instruction(7, "LOAD", "q0", "SC[0]") # reuse SC[0]
     ]
 
@@ -26,9 +26,9 @@ if __name__ == '__main__':
             initial_surface_code_blocks=sc
             )
 
-    mtx_ir_compiler.initialize("q0", True, 0, 1)
-    mtx_ir_compiler.initialize("q1", True, 1, 1)
-    mtx_ir_compiler.initialize("q2", True, 0, 2)
+    mtx_ir_compiler.initialize("q0", True, 0, 0)
+    mtx_ir_compiler.initialize("q1", True, 1, 0)
+    mtx_ir_compiler.initialize("q2", True, 0, 1)
 
 
     layers = mtx_ir_compiler.compile(instructions)

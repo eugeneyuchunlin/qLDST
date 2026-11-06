@@ -19,7 +19,7 @@ Example::
     ir = MtxIRCompiler(initial_memory_code_blocks=[memory],
                        initial_surface_code_blocks=[surface],
                        memory_basis="Z")
-    ir.initialize("q0", True, 0, 7)          # q0 in logical 7 of MEM[0]
+    ir.initialize("q0", True, 0, 6)          # q0 in logical 6 of MEM[0]
     ir.compile([Instruction(1, "LOAD", "q0", "SC[0]")])
 
     circuit = CircuitCompiler([memory], [surface], rounds_per_step=12,
@@ -29,7 +29,7 @@ Example::
 
 from .codes import BivariateBicycleCode, SurfaceCode
 from .compiler import CircuitCompiler, build_example
-from .ir import CodeBlock, Instruction, MemoryInstruction, MtxIRCompiler, MtxIRLayer
+from .ir import CodeBlock, CodeBlockType, Instruction, MemoryInstruction, MtxIRCompiler, MtxIRLayer
 from .polynomial import Polynomial
 
 __version__ = "0.1.0"
@@ -38,6 +38,7 @@ __all__ = [
     "BivariateBicycleCode",
     "CircuitCompiler",
     "CodeBlock",
+    "CodeBlockType",
     "Instruction",
     "MemoryInstruction",
     "MtxIRCompiler",

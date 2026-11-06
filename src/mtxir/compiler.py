@@ -854,11 +854,11 @@ def build_example(
     p: float = 0.0,
     load_step: int = 0,
     basis: str = "Z",
-    initial_placement = 1,
+    initial_placement = 0,
 ) -> tuple[stim.Circuit, List[str]]:
     """LOAD of q0 from one gross code block into one d=11 surface code.
 
-    q0 sits in gross-code logical k = ``initial_placement`` (from 1).  The
+    q0 sits in gross-code logical k = ``initial_placement`` (from 0).  The
     LOAD measures Z_k Z_SC for ``rounds_per_step`` rounds, runs one round
     of the original codes, measures X_k for ``rounds_per_step`` rounds and
     runs one more round of the original codes before the final readout.
@@ -910,7 +910,7 @@ if __name__ == "__main__":
     parser.add_argument("--load-step", type=int, default=0)
     parser.add_argument("--basis", choices=["Z", "X"], default="Z")
     parser.add_argument("--out", default="mtx_ir_load_gadget_bb12_surf11.stim")
-    parser.add_argument("--placement", default=1, type=int)
+    parser.add_argument("--placement", default=0, type=int)
     args = parser.parse_args()
 
     circuit, _ = build_example(args.rounds, args.p, args.load_step, args.basis, args.placement)

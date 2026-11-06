@@ -30,10 +30,10 @@ surface = CodeBlock(SurfaceCode(5))
 ir = MtxIRCompiler(initial_memory_code_blocks=[memory],
                    initial_surface_code_blocks=[surface],
                    memory_basis="Z")
-ir.initialize("q0", True, 0, 7)          # q0 starts in logical 7 of MEM[0]
+ir.initialize("q0", True, 0, 6)          # q0 starts in logical 6 of MEM[0]
 ir.compile([
     Instruction(1, "LOAD", "q0", "SC[0]"),
-    Instruction(4, "STORE", "q0", "MEM[0][7]"),
+    Instruction(4, "STORE", "q0", "MEM[0][6]"),
 ])
 
 circuit = CircuitCompiler([memory], [surface], rounds_per_step=12,
@@ -64,7 +64,7 @@ The syntax is `Instruction(time, op, qubit, destination)`:
 | Op | Destination | Effect |
 |---|---|---|
 | `LOAD` | `SC[i]` | teleport `qubit` from its memory slot into surface patch `i` |
-| `STORE` | `MEM[i][j]` | teleport `qubit` from its surface patch into slot `j` (from 1) of memory block `i` |
+| `STORE` | `MEM[i][j]` | teleport `qubit` from its surface patch into slot `j` (from 0) of memory block `i` |
 
 Each op occupies `MemoryInstruction.<op>.time_steps` time steps (3 for both).
 Instructions at the same time step run in parallel. `compile` rejects

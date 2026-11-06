@@ -93,12 +93,15 @@ class Instruction:
             self, "slot_index", int(slot) if slot is not None else None
         )
 
-
+class CodeBlockType(Enum):
+    MEM = "MEM"
+    SC = "SC"
 
 class CodeBlock:
     """High-level storage of logical qubits."""
 
-    def __init__(self, code):
+    def __init__(self, code, type: CodeBlockType | None = None):
+        """``type`` defaults to SC for a surface code and MEM otherwise."""
         self.hx = code.hx.copy()
         self.hz = code.hz.copy()
         self.capacity = code.k
@@ -113,11 +116,20 @@ class CodeBlock:
         # the empty slot is in.  sign is None for +1, or (time step, vertex
         # check rows) of the measurement whose outcome gives it.
         self.empty_state = [None] * self.capacity
+        if type is None:
+            type = (CodeBlockType.SC if isinstance(code, SurfaceCode)
+                    else CodeBlockType.MEM)
+        self.type: CodeBlockType = type
 
     def first_empty_spot(self):
         for i, q in enumerate(self.qubits):
             if q == None:
-                return i + 1
+                return i
+
+    def locate(self, qubit: str):
+        """Slot of ``qubit``, counting from 0."""
+        return self.qubits.index(qubit)
+
 
 
 class MtxIRLayer:
@@ -353,18 +365,18 @@ class MtxIRCompiler:
             return sorted(bb.support(left * left_offset, right * right_offset))
 
         
-        assert (index > 0), "Index must be possitive"
+        assert 0 <= index < 12, "Index must be in 0..11"
 
 
-        if index <= 6:
-            j = index - 1
+        if index < 6:
+            j = index
             alpha = alpha_list[j]
             beta = beta_list[j]
 
             x = native_support(alpha * p, alpha * q)
             z = native_support(beta * shift * s.T, beta * shift * r.T)
         else:
-            j = index - 7
+            j = index - 6
             alpha_T = alpha_list[j].T
             beta_T = beta_list[j].T
 
@@ -429,16 +441,20 @@ class MtxIRCompiler:
             (base.sx, base.sz) if other == "X" else (base.sz, base.sx)
         )
 
-        for b, _ in operands:
+        for b, operand_support in operands:
             col_map = b.local_to_global_col_mapping
             for local, row in enumerate(other_checks(b)):
+
+                if not np.any(row[list(map(int, operand_support))]):
+                    continue
+
                 expected = GF2.Zeros(old_n)
                 expected[[col_map[int(q)] for q in np.flatnonzero(row)]] = 1
-
+                data = [col_map[q] for q in range(b.hx.shape[1])] 
                 g = global_row(b, local)
                 if (
                     not np.array_equal(base_other[g], expected)
-                    or np.any(base_same[g] != 0)
+                    or np.any(base_same[g][data] != 0)
                 ):
                     raise ValueError(
                         f"Operand {other} checks are already modified; "
@@ -603,6 +619,13 @@ class MtxIRCompiler:
         redundancies = GF2(
             np.asarray(base_other[operand_rows], dtype=int)
         ).left_null_space()
+        n_data = sum(b.hx.shape[1] for b in self.code_blocks)
+        old_edges = same[operand_rows][:, n_data:old_n]
+        if redundancies.shape[0] and old_edges.shape[1]:
+            residue = redundancies @ old_edges
+            if np.any(residue):
+                redundancies = residue.left_null_space() @ redundancies
+
         implied = redundancies @ same[operand_rows][:, aux_cols]
 
         def cycle_vector(vertices):
@@ -677,6 +700,8 @@ class MtxIRCompiler:
 
         assert new_k == old_k - 1
 
+
+
         # ------------------------------------------------------------
         # 9. Register the auxiliary columns and return the layer.
         # ------------------------------------------------------------
@@ -723,7 +748,7 @@ class MtxIRCompiler:
         )
 
     def _slot_logicals(self, block: CodeBlock, slot: int):
-        """Local supports {"Z": ..., "X": ...} of logical ``slot`` (from 1)."""
+        """Local supports {"Z": ..., "X": ...} of logical ``slot`` (from 0)."""
         if any(block is b for b in self.memory_code_blocks):
             z, x = self._gross_logicals(block.code, slot)
         else:
@@ -742,7 +767,7 @@ class MtxIRCompiler:
     ):
         """
         Teleport the logical in ``source_slot`` of ``source`` into the empty
-        ``dest_slot`` of ``dest`` (slots count from 1).  The destination is
+        ``dest_slot`` of ``dest`` (slots count from 0).  The destination is
         in an eigenstate of some basis B (see ``CodeBlock.empty_state``);
         the joint measurement uses the other basis J, so no preparation
         is needed.  There are four time steps:
@@ -769,12 +794,12 @@ class MtxIRCompiler:
 
         assert (len(bases) >= 3), "len(bases) must be at least 3"
 
-        qubit = source.qubits[source_slot - 1]
+        qubit = source.qubits[source_slot]
         if qubit is None:
             raise ValueError(f"Source slot {source_slot} is empty.")
-        if dest.qubits[dest_slot - 1] is not None:
+        if dest.qubits[dest_slot] is not None:
             raise ValueError(f"Destination slot {dest_slot} is occupied.")
-        state = dest.empty_state[dest_slot - 1]
+        state = dest.empty_state[dest_slot]
         if state is None:
             raise ValueError(
                 f"Destination slot {dest_slot} is not in a known eigenstate."
@@ -831,12 +856,12 @@ class MtxIRCompiler:
             "gadgets": [joint_gadget, source_gadget],
         })
 
-        source.qubits[source_slot - 1] = None
-        source.empty_state[source_slot - 1] = (
+        source.qubits[source_slot] = None
+        source.empty_state[source_slot] = (
             dest_basis, (bases[1].time_step, source_gadget["vertex_check_rows"])
         )
-        dest.qubits[dest_slot - 1] = qubit
-        dest.empty_state[dest_slot - 1] = None
+        dest.qubits[dest_slot] = qubit
+        dest.empty_state[dest_slot] = None
         self.locations[qubit] = dest
 
         return joint_gadget, source_gadget, updated_layers
@@ -857,8 +882,8 @@ class MtxIRCompiler:
             raise ValueError("The destination surface code block is occupied.")
 
         return self._teleport(bases, memory_code_block,
-            memory_code_block.qubits.index(qubit) + 1,
-            surface_code_block, 1, in_time,
+            memory_code_block.locate(qubit),
+            surface_code_block, 0, in_time,
         )
 
     def _store(
@@ -870,7 +895,7 @@ class MtxIRCompiler:
         in_time=False,
     ):
         """Teleport the logical in a surface code block into logical
-        ``dest`` (from 1) of a gross code block, or into its first empty
+        ``dest`` (from 0) of a gross code block, or into its first empty
         slot if ``dest`` is None; see ``_teleport``.  The joint measurement
         is ZZ if the slot is in an X eigenstate (e.g. freed by a LOAD) and
         XX if it is in a Z eigenstate (e.g. a fresh block reset in |0>).
@@ -881,26 +906,26 @@ class MtxIRCompiler:
                 raise ValueError("Memory Block is full")
 
         return self._teleport(bases, 
-            surface_code_block, 1, memory_code_block, dest, in_time,
+            surface_code_block, 0, memory_code_block, dest, in_time,
         )
 
     def initialize(self, qubit: str, is_memory_block: bool, i: int, j: int=None):
-        """Place ``qubit`` in logical ``j`` (from 1) of memory block ``i``,
+        """Place ``qubit`` in logical ``j`` (from 0) of memory block ``i``,
         or in surface block ``i``."""
         if is_memory_block:
             block = self.memory_code_blocks[i]
-            if j is None or not 1 <= j <= block.capacity:
+            if j is None or not 0 <= j < block.capacity:
                 raise ValueError(
-                    f"Logical index must be in 1..{block.capacity}, got {j}."
+                    f"Logical index must be in 0..{block.capacity - 1}, got {j}."
                 )
         else:
-            block, j = self.surface_code_blocks[i], 1
+            block, j = self.surface_code_blocks[i], 0
 
-        if block.qubits[j - 1] is not None:
-            raise ValueError(f"Slot {j} already holds {block.qubits[j - 1]}.")
+        if block.qubits[j] is not None:
+            raise ValueError(f"Slot {j} already holds {block.qubits[j]}.")
 
-        block.qubits[j - 1] = qubit
-        block.empty_state[j - 1] = None
+        block.qubits[j] = qubit
+        block.empty_state[j] = None
         self.locations[qubit] = block
 
 
@@ -918,6 +943,14 @@ class MtxIRCompiler:
         
 
 
+    def _location_name(self, qubit: str):
+        """Where ``qubit`` is now, spelled like ``Instruction.destination``."""
+        block = self.locations[qubit]
+        if block.type == CodeBlockType.MEM:
+            index = self.memory_code_blocks.index(block)
+            return f"MEM[{index}][{block.locate(qubit)}]"
+        return f"SC[{self.surface_code_blocks.index(block)}]"
+
     def compile(self, instructions: List[Instruction]):
 
         # check dependency
@@ -929,6 +962,14 @@ class MtxIRCompiler:
             if not instr.time_index in timing_groups:
                 timing_groups[instr.time_index] = []
 
+        current = {qubit: self._location_name(qubit) for qubit in self.locations}
+        sources = {}
+        for instr in sorted(instructions, key=lambda i: i.time_index):
+            if instr.qubit not in current:
+                raise ValueError(f"{instr.qubit} is not initialized.")
+            sources[instr] = current[instr.qubit]
+            current[instr.qubit] = instr.destination
+
         for instr in instructions:
             timing_groups[instr.time_index].append(instr)
             for t in range(instr.time_index, instr.time_index + instr.instr.time_steps):
@@ -936,6 +977,7 @@ class MtxIRCompiler:
                     occupancy[t] = []
                 occupancy[t].append(instr.qubit)
                 occupancy[t].append(instr.destination)
+                occupancy[t].append(sources[instr])
 
 
 #         import json
@@ -951,7 +993,7 @@ class MtxIRCompiler:
                 self.step()
 
             for instr in instr_group:
-                print("Instr: ", instr)
+                # print("Instr: ", instr)
                 # Build the layers the instruction occupies, if not yet built.
                 steps = instr.instr.time_steps
                 tt = 0
@@ -1002,15 +1044,15 @@ if __name__ == '__main__':
     surface = SurfaceCode(11)
 
 
-    bb_code_block1 = CodeBlock(bb)
-    bb_code_block2 = CodeBlock(bb)
-    sc_code_block = CodeBlock(surface)
-    new_sc_code_block = CodeBlock(surface)
+    bb_code_block1 = CodeBlock(bb, type=CodeBlockType.MEM)
+    bb_code_block2 = CodeBlock(bb, type=CodeBlockType.MEM)
+    sc_code_block = CodeBlock(surface, type=CodeBlockType.SC)
+    new_sc_code_block = CodeBlock(surface, type=CodeBlockType.SC)
 
 
     instructions : List[Instruction] = [
         Instruction(1, "LOAD", "q0", "SC[0]"),
-        Instruction(5, "STORE", "q0", "MEM[0][1]")
+        Instruction(5, "STORE", "q0", "MEM[0][0]")
     ]
 
     mtx_ir_compiler = MtxIRCompiler(
@@ -1018,6 +1060,6 @@ if __name__ == '__main__':
             initial_surface_code_blocks=[sc_code_block]
             )
 
-    mtx_ir_compiler.initialize("q0", True, 0, 1)
+    mtx_ir_compiler.initialize("q0", True, 0, 0)
     mtx_ir_compiler.compile(instructions)
     print(mtx_ir_compiler.MtxIRs[-1].qubit_overhead)
